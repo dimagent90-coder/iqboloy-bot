@@ -65,6 +65,9 @@ def init_db():
         user_id     INTEGER NOT NULL,
         PRIMARY KEY (question_id, user_id)
     );
+    CREATE TABLE IF NOT EXISTS blocked (
+        user_id INTEGER PRIMARY KEY
+    );
     """)
     conn.commit()
     conn.close()
@@ -74,6 +77,30 @@ def like_count(qid):
     n = conn.execute("SELECT COUNT(*) c FROM likes WHERE question_id=?", (qid,)).fetchone()["c"]
     conn.close()
     return n
+
+def is_blocked(user_id):
+    conn = db()
+    row = conn.execute("SELECT 1 FROM blocked WHERE user_id=?", (user_id,)).fetchone()
+    conn.close()
+    return row is not None
+
+def asker_of(qid):
+    conn = db()
+    row = conn.execute("SELECT asker_id FROM questions WHERE id=?", (qid,)).fetchone()
+    conn.close()
+    return row["asker_id"] if row else None
+
+# Yomon so‘zlar ro‘yxati — kerak bo‘lsa qo‘shing/o‘chiring (BAD_WORDS env orqali ham qo‘shsa bo‘ladi).
+BAD_WORDS = set(
+    w.strip().lower() for w in os.environ.get(
+        "BAD_WORDS",
+        "jinni,ahmoq,tentak,fuck,shit,bitch,suka,blyat,pidr,debil"
+    ).split(",") if w.strip()
+)
+
+def has_profanity(text):
+    t = text.lower()
+    return any(w in t for w in BAD_WORDS)
 
 # ----------------------------- HELPERS -----------------------------
 async def is_member(context, user_id):
@@ -162,6 +189,40 @@ async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏳ Savol #{r['id']}\n\n{r['text']}\n\n↩️ Javob berish uchun shu xabarga reply qiling.",
         )
 
+async def block(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /block <savol_raqami> — o‘sha savol muallifini bloklaydi (anonim qoladi)."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Foydalanish: /block <savol raqami>")
+        return
+    qid = int(context.args[0])
+    aid = asker_of(qid)
+    if not aid:
+        await update.message.reply_text(f"Savol #{qid} topilmadi.")
+        return
+    conn = db()
+    conn.execute("INSERT OR IGNORE INTO blocked (user_id) VALUES (?)", (aid,))
+    conn.commit(); conn.close()
+    await update.message.reply_text(f"⛔ Savol #{qid} muallifi bloklandi. Endi u savol yubora olmaydi.")
+
+async def unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /unblock <savol_raqami> — blokni ochadi."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Foydalanish: /unblock <savol raqami>")
+        return
+    qid = int(context.args[0])
+    aid = asker_of(qid)
+    if not aid:
+        await update.message.reply_text(f"Savol #{qid} topilmadi.")
+        return
+    conn = db()
+    conn.execute("DELETE FROM blocked WHERE user_id=?", (aid,))
+    conn.commit(); conn.close()
+    await update.message.reply_text(f"✅ Savol #{qid} muallifi blokdan chiqarildi.")
+
 # ----------------------------- MESSAGES -----------------------------
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -205,9 +266,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if is_blocked(uid):
+        await update.message.reply_text(
+            "⛔ Siz vaqtincha savol berish huquqidan mahrum qilingansiz."
+        )
+        return
+
     text = update.message.text.strip()
     if len(text) < 3:
         await update.message.reply_text("Savolingiz juda qisqa. Iltimos to‘liqroq yozing.")
+        return
+    if has_profanity(text):
+        await update.message.reply_text(
+            "⚠️ Savolingizda nomaqbul so‘zlar bor. Iltimos, hurmat bilan qayta yozing."
+        )
         return
 
     conn = db()
@@ -272,6 +344,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("feed", feed))
     app.add_handler(CommandHandler("pending", pending))
+    app.add_handler(CommandHandler("block", block))
+    app.add_handler(CommandHandler("unblock", unblock))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     log.info("Bot started.")
