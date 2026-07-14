@@ -117,11 +117,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=join_prompt(),
         )
         return
+    name = update.effective_user.first_name or update.effective_user.username or "do‘st"
     await update.message.reply_text(
-        "Assalomu alaykum! 👋\n\n"
-        "Savolingizni shu yerga yozing — u *anonim* tarzda yuboriladi.\n"
+        f"✈️Assalomu alaykum {name} 😁\n\n"
+        "🙌Savolingizni shu yerga yozing (anonim tarzda yuboriladi✅)\n\n"
         "Boshqalarning savollarini ko‘rish: /feed",
-        parse_mode="Markdown",
     )
 
 async def feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
