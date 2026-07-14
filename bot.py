@@ -1,14 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Anonymous Q&A Telegram bot.
-
-Flow:
-  - User must be a member of the required channel before asking.
-  - User submits a question anonymously.
-  - Bot forwards the question to the admin (Iqboloy) as a notification.
-  - Admin replies; the answer is relayed back to the asker as coming from the bot.
-  - All Q&A appear in a public feed; users can like questions.
-  - Admin can list all still-unanswered questions with /pending.
 """
 
 import os
@@ -32,9 +24,9 @@ from telegram.ext import (
 )
 
 # ----------------------------- CONFIG -----------------------------
-BOT_TOKEN        = os.environ["BOT_TOKEN"]              # from @BotFather
+BOT_TOKEN        = os.environ["BOT_TOKEN"]
 REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL", "@xorazmloyihalar")
-ADMIN_ID         = int(os.environ["ADMIN_ID"])         # Iqboloy's numeric Telegram ID
+ADMIN_ID         = int(os.environ["ADMIN_ID"])
 DB_PATH          = os.environ.get("DB_PATH", "qabot.db")
 
 logging.basicConfig(
@@ -90,7 +82,7 @@ def asker_of(qid):
     conn.close()
     return row["asker_id"] if row else None
 
-# Yomon so‘zlar ro‘yxati — kerak bo‘lsa qo‘shing/o‘chiring (BAD_WORDS env orqali ham qo‘shsa bo‘ladi).
+# Yomon so'zlar ro'yxati — BAD_WORDS env orqali ham qo'shsa bo'ladi.
 BAD_WORDS = set(
     w.strip().lower() for w in os.environ.get(
         "BAD_WORDS",
@@ -104,7 +96,6 @@ def has_profanity(text):
 
 # ----------------------------- HELPERS -----------------------------
 async def is_member(context, user_id):
-    """True if user is a member/admin/owner of the required channel."""
     try:
         m = await context.bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         return m.status in (
@@ -165,7 +156,6 @@ async def feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(body, parse_mode="Markdown", reply_markup=kb)
 
 async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: list all still-unanswered questions."""
     uid = update.effective_user.id
     if uid != ADMIN_ID:
         await update.message.reply_text("Bu buyruq faqat administrator uchun.")
@@ -183,14 +173,12 @@ async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Javob berish uchun kerakli savolga *reply* qiling.",
         parse_mode="Markdown",
     )
-    # Send each unanswered question as its own message so the admin can reply to it.
     for r in rows:
         await update.message.reply_text(
             f"⏳ Savol #{r['id']}\n\n{r['text']}\n\n↩️ Javob berish uchun shu xabarga reply qiling.",
         )
 
 async def block(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: /block <savol_raqami> — o‘sha savol muallifini bloklaydi (anonim qoladi)."""
     if update.effective_user.id != ADMIN_ID:
         return
     if not context.args or not context.args[0].isdigit():
@@ -207,7 +195,6 @@ async def block(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⛔ Savol #{qid} muallifi bloklandi. Endi u savol yubora olmaydi.")
 
 async def unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: /unblock <savol_raqami> — blokni ochadi."""
     if update.effective_user.id != ADMIN_ID:
         return
     if not context.args or not context.args[0].isdigit():
@@ -223,14 +210,49 @@ async def unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit(); conn.close()
     await update.message.reply_text(f"✅ Savol #{qid} muallifi blokdan chiqarildi.")
 
+async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Foydalanish: /delete <savol raqami>")
+        return
+    qid = int(context.args[0])
+    conn = db()
+    row = conn.execute("SELECT 1 FROM questions WHERE id=?", (qid,)).fetchone()
+    if not row:
+        conn.close()
+        await update.message.reply_text(f"Savol #{qid} topilmadi.")
+        return
+    conn.execute("DELETE FROM questions WHERE id=?", (qid,))
+    conn.execute("DELETE FROM likes WHERE question_id=?", (qid,))
+    conn.commit(); conn.close()
+    await update.message.reply_text(f"🗑️ Savol #{qid} o‘chirildi.")
+
+async def clearanswer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Foydalanish: /clearanswer <savol raqami>")
+        return
+    qid = int(context.args[0])
+    conn = db()
+    row = conn.execute("SELECT 1 FROM questions WHERE id=?", (qid,)).fetchone()
+    if not row:
+        conn.close()
+        await update.message.reply_text(f"Savol #{qid} topilmadi.")
+        return
+    conn.execute("UPDATE questions SET answer=NULL, answered=0 WHERE id=?", (qid,))
+    conn.commit(); conn.close()
+    await update.message.reply_text(
+        f"♻️ Savol #{qid} javobi o‘chirildi. Endi unga qayta javob berishingiz mumkin."
+    )
+
 # ----------------------------- MESSAGES -----------------------------
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
-    # If the ADMIN is replying to a forwarded question, treat it as an answer.
     if uid == ADMIN_ID and update.message.reply_to_message:
         replied = update.message.reply_to_message.text or ""
-        # Forwarded questions are tagged with "#<id>" — parse it.
         qid = None
         for token in replied.replace("\n", " ").split():
             t = token.strip(".,:")
@@ -246,7 +268,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             conn.execute("UPDATE questions SET answer=?, answered=1 WHERE id=?", (answer, qid))
             conn.commit(); conn.close()
-            # Relay to asker as coming from the bot (Iqboloy stays hidden)
             try:
                 await context.bot.send_message(
                     q["asker_id"],
@@ -258,7 +279,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ Javob #{qid} yuborildi.")
             return
 
-    # Otherwise a normal user is asking a question — require membership.
     if not await is_member(context, uid):
         await update.message.reply_text(
             "Savol berish uchun avval kanalga qo‘shiling.",
@@ -294,7 +314,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Savolingiz anonim tarzda yuborildi (Savol #{qid}).\n"
         "Javob tayyor bo‘lgach sizga xabar beramiz."
     )
-    # Notify the admin (Iqboloy). The "#<id>" tag lets us match her reply.
     await context.bot.send_message(
         ADMIN_ID,
         f"🆕 Yangi savol #{qid}\n\n{text}\n\n"
@@ -346,6 +365,8 @@ def main():
     app.add_handler(CommandHandler("pending", pending))
     app.add_handler(CommandHandler("block", block))
     app.add_handler(CommandHandler("unblock", unblock))
+    app.add_handler(CommandHandler("delete", delete))
+    app.add_handler(CommandHandler("clearanswer", clearanswer))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     log.info("Bot started.")
