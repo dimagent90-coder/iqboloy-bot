@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Anonymous Q&A Telegram bot.
-"""
+"""Anonymous Q&A Telegram bot."""
 
 import os
 import sqlite3
@@ -50,6 +48,7 @@ def init_db():
         text       TEXT NOT NULL,
         answer     TEXT,
         answered   INTEGER DEFAULT 0,
+        photo_id   TEXT,
         created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS likes (
@@ -61,6 +60,9 @@ def init_db():
         user_id INTEGER PRIMARY KEY
     );
     """)
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(questions)").fetchall()]
+    if "photo_id" not in cols:
+        conn.execute("ALTER TABLE questions ADD COLUMN photo_id TEXT")
     conn.commit()
     conn.close()
 
@@ -82,7 +84,6 @@ def asker_of(qid):
     conn.close()
     return row["asker_id"] if row else None
 
-# Yomon so'zlar ro'yxati — BAD_WORDS env orqali ham qo'shsa bo'ladi.
 BAD_WORDS = set(
     w.strip().lower() for w in os.environ.get(
         "BAD_WORDS",
@@ -144,9 +145,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = db()
-    rows = conn.execute(
-        "SELECT * FROM questions ORDER BY id DESC LIMIT 15"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM questions ORDER BY id DESC LIMIT 15").fetchall()
     conn.close()
     if not rows:
         await update.message.reply_text("Hozircha savollar yo‘q.")
@@ -161,9 +160,7 @@ async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Bu buyruq faqat administrator uchun.")
         return
     conn = db()
-    rows = conn.execute(
-        "SELECT * FROM questions WHERE answered=0 ORDER BY id ASC"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM questions WHERE answered=0 ORDER BY id ASC").fetchall()
     conn.close()
     if not rows:
         await update.message.reply_text("🎉 Javob berilmagan savollar yo‘q. Hammasi javoblangan!")
@@ -252,7 +249,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
     if uid == ADMIN_ID and update.message.reply_to_message:
-        replied = update.message.reply_to_message.text or ""
+        rm = update.message.reply_to_message
+        replied = (rm.text or "") + " " + (rm.caption or "")
         qid = None
         for token in replied.replace("\n", " ").split():
             t = token.strip(".,:")
@@ -287,9 +285,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if is_blocked(uid):
-        await update.message.reply_text(
-            "⛔ Siz vaqtincha savol berish huquqidan mahrum qilingansiz."
-        )
+        await update.message.reply_text("⛔ Siz vaqtincha savol berish huquqidan mahrum qilingansiz.")
         return
 
     text = update.message.text.strip()
@@ -297,9 +293,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Savolingiz juda qisqa. Iltimos to‘liqroq yozing.")
         return
     if has_profanity(text):
-        await update.message.reply_text(
-            "⚠️ Savolingizda nomaqbul so‘zlar bor. Iltimos, hurmat bilan qayta yozing."
-        )
+        await update.message.reply_text("⚠️ Savolingizda nomaqbul so‘zlar bor. Iltimos, hurmat bilan qayta yozing.")
         return
 
     conn = db()
@@ -316,8 +310,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await context.bot.send_message(
         ADMIN_ID,
-        f"🆕 Yangi savol #{qid}\n\n{text}\n\n"
-        "↩️ Javob berish uchun shu xabarga *reply* qiling.",
+        f"🆕 Yangi savol #{qid}\n\n{text}\n\n↩️ Javob berish uchun shu xabarga *reply* qiling.",
         parse_mode="Markdown",
     )
 
@@ -356,6 +349,44 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("👍 Yoqdi!" if liked else "Bekor qilindi.")
         return
 
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+
+    if not await is_member(context, uid):
+        await update.message.reply_text(
+            "Savol berish uchun avval kanalga qo‘shiling.",
+            reply_markup=join_prompt(),
+        )
+        return
+    if is_blocked(uid):
+        await update.message.reply_text("⛔ Siz vaqtincha savol berish huquqidan mahrum qilingansiz.")
+        return
+
+    file_id = update.message.photo[-1].file_id
+    caption = (update.message.caption or "").strip()
+    if caption and has_profanity(caption):
+        await update.message.reply_text("⚠️ Izohingizda nomaqbul so‘zlar bor. Iltimos, hurmat bilan qayta yuboring.")
+        return
+
+    text = caption if caption else "(rasm)"
+    conn = db()
+    cur = conn.execute(
+        "INSERT INTO questions (asker_id, text, photo_id, created_at) VALUES (?,?,?,?)",
+        (uid, text, file_id, datetime.utcnow().isoformat()),
+    )
+    qid = cur.lastrowid
+    conn.commit(); conn.close()
+
+    await update.message.reply_text(
+        f"✅ Rasmli savolingiz anonim tarzda yuborildi (Savol #{qid}).\n"
+        "Javob tayyor bo‘lgach sizga xabar beramiz."
+    )
+    await context.bot.send_photo(
+        ADMIN_ID,
+        photo=file_id,
+        caption=f"🆕 Yangi rasmli savol #{qid}\n\n{text}\n\n↩️ Javob berish uchun shu xabarga reply qiling.",
+    )
+
 # ----------------------------- MAIN -----------------------------
 def main():
     init_db()
@@ -369,6 +400,7 @@ def main():
     app.add_handler(CommandHandler("clearanswer", clearanswer))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     log.info("Bot started.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
